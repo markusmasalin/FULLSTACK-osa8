@@ -5,15 +5,19 @@ const Book = require('./models/book')
 const Author = require('./models/author')
 const User = require('./models/user')
 
+const jwt = require('jsonwebtoken')
+
+const { PubSub } = require('apollo-server')
+const pubsub = new PubSub()
+
 const uuid = require('uuid/v1')
 
 mongoose.set('useFindAndModify', false)
 
 const url = process.env.MONGODB_URI
 
-const jwt = require('jsonwebtoken')
 
-const JWT_SECRET = 'NEED_HERE_A_SECRET_KEY'
+const JWT_SECRET = process.env.SECRET
 
 
 
@@ -36,7 +40,7 @@ const typeDefs = gql`
   
   type User {
     username: String!
-    favoriteGenre: String!
+    favoriteGenre: [String!]
     id: ID!
   }
   
@@ -61,6 +65,7 @@ const typeDefs = gql`
   type Query {
       authorCount: Int!
       allAuthors: [Author!]
+      filterWithGenre(genre: String!): Book
       findAuthor(name: String!): Author
       allBooks(genre: String, author: String): [Book!]
       findBook(title: String!): Book
@@ -86,6 +91,9 @@ const typeDefs = gql`
         password: String!
       ): Token
   }
+  type Subscription {
+    bookAdded: Book!
+  }  
 `
 
 const resolvers = {
@@ -95,19 +103,32 @@ const resolvers = {
         return  Author.find({})
         
     },
+    filterWithGenre: async (root, args) => {
+        const filteredBooks = await Book.find({ genres: args.genre})
+        return filteredBooks
+    },
     findAuthor: async (root, args) => {
        console.log(args.name + 'args name')
        const foundAuthor = await Author.findOne({ name: args.name })
        console.log(foundAuthor)
        return foundAuthor
     },
-    allBooks:  (root, args) => {
-       console.log(args, 'args')
+    allBooks: async (root, args) => {
+        
+        if (!args.genre && !args.author)  {
+            return Book.find({}).populate('author')
+        } else if (!args.author) {
+            return Book.find({ genres: args.genre }).populate('author')
+        } else if (!args.genre) {
+            const findingAuthor = await Author.find({name: args.author})
+            console.log(findingAuthor)
+            return Book.find({ author: findingAuthor}).populate('author')
+        } else {
+            const findingAuthor = await Author.find({name: args.author})
+            console.log(findingAuthor)
+            return Book.find({ genres: args.genre,  author: findingAuthor}).populate('author')
+        }
          
-         return Book.find({}).populate('author')
-       
-       
-       
     },
     me: (root, args, context) => {
         return context.currentUser
@@ -116,48 +137,36 @@ const resolvers = {
   Author: {
      
       bookCount: (root, args) => {
-        console.log(root + 'root')
-        console.log(args + 'args')
-        const count = Book.collection.countDocuments({ author: root._id })
-        console.log(count + 'count')
-        return count
+       // const count = Book.collection.countDocuments({ author: root._id })
+        return root.books.length
       }
   }, 
   Book: {
     author:  (root, args) => {
-        
-        console.log(root)
-        return root.author
-        
-        
+        return root.author   
     }
   }, 
   Mutation: {
       addBook: async(root, args, context) => {
-        
         console.log(args, 'args')
-        console.log(context, 'coontext')
-
+        console.log(context, 'context')
         const currentUser = context.currentUser
-        
         if (!currentUser) {
             throw new AuthenticationError("not authenticated")
           }
-          
         let author = await Author.findOne({ name: args.author})
         console.log('author', author)
-       
         if (author === null || author === undefined) {    
             if (args.author < 4) {
                 throw new UserInputError('Name of the author is too short', {
                   invalidArgs: args.name,
                 })
-              }
-            
+              }         
             author = new Author(
               {
                 name: args.author,
-                born: null
+                born: null,
+                books: []
               }
             )
             try {
@@ -175,10 +184,8 @@ const resolvers = {
               invalidArgs: args.name,
             })
           }
-        const book = new Book({ ...args, author: author._id })
-                
+        const book = new Book({ ...args, author: author._id })         
           console.log('new book', book)
-            
             try {
                 await book.save()
                 console.log('new book', book)
@@ -187,6 +194,19 @@ const resolvers = {
                     invalidArgs: args,
                 })
             }
+            const findTheAuthor = await Author.findOne( {name: args.author})
+            console.log(findTheAuthor, 'findTheAuthor')
+            const listOfBooks = findTheAuthor.books.concat(book._id)
+            console.log(listOfBooks, 'listOfBooks')
+            const authorWithBook = {
+              name: findTheAuthor.name,
+              born: findTheAuthor.born,
+              books: listOfBooks
+            }
+            console.log(authorWithBook.books)
+            const updatedAuthor =  await Author.findByIdAndUpdate(findTheAuthor._id, authorWithBook)
+            console.log(updatedAuthor, 'updatedAuthor')
+            pubsub.publish('BOOK_ADDED', { bookAdded: book })
             return book
       }, 
       editAuthor: async (root, args, context) => {
@@ -236,24 +256,36 @@ const resolvers = {
         return { value: jwt.sign(userForToken, JWT_SECRET) }
       },
      
-  }
+  },
+  Subscription: {
+    bookAdded: {
+      subscribe: () => pubsub.asyncIterator(['BOOK_ADDED'])
+    },
+  },
 }
 
 const server = new ApolloServer({
   typeDefs,
   resolvers,
   context: async ({ req }) => {
+    
     const auth = req ? req.headers.authorization : null
     if (auth && auth.toLowerCase().startsWith('bearer ')) {
       const decodedToken = jwt.verify(
         auth.substring(7), JWT_SECRET
       )
       const currentUser = await User.findById(decodedToken.id)
+     
       return { currentUser }
+    } else {
+        
+        return null
     }
+    
   }
 })
 
-server.listen().then(({ url }) => {
+server.listen().then(({ url, subscriptionsUrl }) => {
   console.log(`Server ready at ${url}`)
+  console.log(`Subscriptions ready at ${subscriptionsUrl}`)
 })

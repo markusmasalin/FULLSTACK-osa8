@@ -7,11 +7,11 @@ const schema = new mongoose.Schema({
     unique: true,
     minlength: 3
   },
-  favoriteGenre: {
+  favoriteGenre: [
     
-      type: String,
+     { type: String }
     
-  }
+  ]
 })
 
 module.exports = mongoose.model('User', schema)
